@@ -6,11 +6,6 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using SharpCompress.Archives;
-using SharpCompress.Common;
-
-// NuGet: SharpCompress (for .7z support)
-// dotnet add package SharpCompress
 
 namespace NppPortableUpdater
 {
@@ -50,11 +45,11 @@ namespace NppPortableUpdater
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
 
-            btnCheck  = new Button { Text = "Check version", Left = 20, Top = 20, Width = 160 };
+            btnCheck  = new Button { Text = "Check version",    Left = 20,  Top = 20, Width = 160 };
             btnUpdate = new Button { Text = "Update Notepad++", Left = 200, Top = 20, Width = 140, Enabled = false };
             progress  = new ProgressBar { Left = 20, Top = 60, Width = 580 };
-            log       = new TextBox   { Left = 20, Top = 95, Width = 580, Height = 260,
-                                        Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+            log       = new TextBox { Left = 20, Top = 95, Width = 580, Height = 260,
+                                      Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
 
             Controls.AddRange(new Control[] { btnCheck, btnUpdate, progress, log });
 
@@ -81,6 +76,59 @@ namespace NppPortableUpdater
             throw new InvalidOperationException(msg);
         }
 
+        // Looks for 7z.exe next to the updater first, then common install paths
+        string Find7Zip()
+        {
+            var candidates = new[]
+            {
+                Path.Combine(root, "7z.exe"),
+                @"C:\Program Files\7-Zip\7z.exe",
+                @"C:\Program Files (x86)\7-Zip\7z.exe"
+            };
+
+            var found = candidates.FirstOrDefault(File.Exists);
+            if (found == null)
+                HardFail("7z.exe not found. Install 7-Zip or place 7z.exe next to this updater.");
+
+            return found!;
+        }
+
+        void Extract7z(string archivePath, string outputDir)
+        {
+            string sevenZip = Find7Zip();
+            Log($"Using: {sevenZip}");
+
+            if (Directory.Exists(outputDir))
+            {
+                Log("Removing old installation...");
+                Directory.Delete(outputDir, recursive: true);
+            }
+            Directory.CreateDirectory(outputDir);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName               = sevenZip,
+                Arguments              = $"x \"{archivePath}\" -o\"{outputDir}\" -y",
+                UseShellExecute        = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                CreateNoWindow         = true
+            };
+
+            using var p = Process.Start(psi)!;
+
+            // Forward 7z output to our log
+            p.OutputDataReceived += (_, e) => { if (e.Data != null) Log(e.Data); };
+            p.ErrorDataReceived  += (_, e) => { if (e.Data != null) Log("ERR: " + e.Data); };
+            p.BeginOutputReadLine();
+            p.BeginErrorReadLine();
+
+            p.WaitForExit();
+
+            if (p.ExitCode != 0)
+                HardFail($"7-Zip exited with code {p.ExitCode}.");
+        }
+
         Version GetInstalledVersion()
         {
             if (!File.Exists(nppExe))
@@ -90,12 +138,9 @@ namespace NppPortableUpdater
             }
 
             var info = FileVersionInfo.GetVersionInfo(nppExe);
-
-            // FileVersionInfo.ProductVersion can contain commit hashes like "8.7.6.0 (64-bit)"
-            // so we strip everything after the first space and take only numeric segments.
-            var raw = (info.ProductVersion ?? info.FileVersion ?? "0.0")
-                          .Split(' ')[0]          // drop any suffix like "(64-bit)"
-                          .Split('-')[0];         // drop any pre-release tag
+            var raw  = (info.ProductVersion ?? info.FileVersion ?? "0.0")
+                           .Split(' ')[0]
+                           .Split('-')[0];
 
             return Version.Parse(raw);
         }
@@ -120,7 +165,7 @@ namespace NppPortableUpdater
                 var tag = doc.RootElement.GetProperty("tag_name").GetString()!;
                 latestVersion = Version.Parse(tag.TrimStart('v'));
 
-                // Find the portable .7z asset for x64 (skip arm64 variants)
+                // portable .7z for x64, skip arm64
                 var asset = doc.RootElement.GetProperty("assets").EnumerateArray()
                     .FirstOrDefault(a =>
                     {
@@ -130,12 +175,12 @@ namespace NppPortableUpdater
                     });
 
                 if (asset.ValueKind == JsonValueKind.Undefined)
-                    HardFail("Could not find a portable .7z asset for x64.");
+                    HardFail("Could not find portable .7z asset for x64.");
 
                 assetUrl = asset.GetProperty("browser_download_url").GetString();
 
-                Log($"Latest version : {latestVersion}");
-                Log($"Asset          : {Path.GetFileName(assetUrl)}");
+                Log($"Latest version: {latestVersion}");
+                Log($"Asset: {Path.GetFileName(assetUrl)}");
                 progress.Value = 100;
 
                 if (installedVersion < latestVersion)
@@ -143,12 +188,9 @@ namespace NppPortableUpdater
                     Log("Update available 🚀");
                     btnUpdate.Enabled = true;
                 }
-                else
-                {
-                    Log("Notepad++ is up to date ✔");
-                }
+                else Log("Notepad++ is up to date ✔");
             }
-            catch (Exception ex) when (ex is not InvalidOperationException)
+            catch (Exception ex)
             {
                 HardFail(ex.Message);
             }
@@ -158,11 +200,10 @@ namespace NppPortableUpdater
         {
             try
             {
-                string shortcutPath = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-                    "Notepad++ Portable.lnk");
+                string desktopPath  = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                string shortcutPath = Path.Combine(desktopPath, "Notepad++ Portable.lnk");
 
-                Type shellType = Type.GetTypeFromProgID("WScript.Shell")!;
+                Type shellType   = Type.GetTypeFromProgID("WScript.Shell")!;
                 dynamic shell    = Activator.CreateInstance(shellType)!;
                 dynamic shortcut = shell.CreateShortcut(shortcutPath);
 
@@ -181,8 +222,7 @@ namespace NppPortableUpdater
 
         async Task UpdateNppAsync()
         {
-            if (assetUrl == null || latestVersion == null)
-                HardFail("No update info. Run 'Check version' first.");
+            if (assetUrl == null || latestVersion == null) HardFail("No update info.");
 
             try
             {
@@ -192,89 +232,36 @@ namespace NppPortableUpdater
                 string archiveName = Path.GetFileName(assetUrl!);
                 string archivePath = Path.Combine(root, archiveName);
 
-                // ── 1. Download ──────────────────────────────────────────
                 if (File.Exists(archivePath))
                 {
-                    Log($"Removing stale download: {archiveName}");
+                    Log($"Deleting existing {archiveName}...");
                     File.Delete(archivePath);
                 }
 
-                Log($"Downloading {archiveName}…");
-                progress.Value = 10;
+                Log($"Downloading {archiveName}...");
+                progress.Value = 20;
 
-                using (var client = new HttpClient())
-                {
-                    client.DefaultRequestHeaders.UserAgent.ParseAdd("NppPortableUpdater");
+                using var client = new HttpClient();
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("NppPortableUpdater");
+                var data = await client.GetByteArrayAsync(assetUrl);
+                await File.WriteAllBytesAsync(archivePath, data);
 
-                    // Stream the download so we can report progress
-                    using var response = await client.GetAsync(assetUrl, HttpCompletionOption.ResponseHeadersRead);
-                    response.EnsureSuccessStatusCode();
+                Log("Extracting...");
+                progress.Value = 50;
+                Extract7z(archivePath, nppDir);
 
-                    long total   = response.Content.Headers.ContentLength ?? -1;
-                    long written = 0;
-
-                    await using var src  = await response.Content.ReadAsStreamAsync();
-                    await using var dest = File.Create(archivePath);
-
-                    var buffer = new byte[81_920];
-                    int read;
-                    while ((read = await src.ReadAsync(buffer)) > 0)
-                    {
-                        await dest.WriteAsync(buffer.AsMemory(0, read));
-                        written += read;
-                        if (total > 0)
-                            progress.Value = 10 + (int)(written * 40 / total); // 10 → 50 %
-                    }
-                }
-
-                Log("Download complete.");
-
-                // ── 2. Extract (SharpCompress handles .7z natively) ──────
-                Log("Extracting…");
-                progress.Value = 55;
-
-                if (Directory.Exists(nppDir))
-                {
-                    Log("Removing old installation…");
-                    Directory.Delete(nppDir, recursive: true);
-                }
-                Directory.CreateDirectory(nppDir);
-
-                using (var archive = ArchiveFactory.Open(archivePath))
-                {
-                    var entries = archive.Entries.Where(e => !e.IsDirectory).ToList();
-                    int total   = entries.Count;
-                    int done    = 0;
-
-                    foreach (var entry in entries)
-                    {
-                        entry.WriteToDirectory(nppDir,
-                            new ExtractionOptions { ExtractFullPath = true, Overwrite = true });
-
-                        done++;
-                        progress.Value = 55 + (int)(done * 30 / total); // 55 → 85 %
-                    }
-                }
-
-                Log("Extraction complete.");
-
-                // ── 3. Clean up archive ──────────────────────────────────
-                Log($"Deleting {archiveName}…");
+                progress.Value = 80;
+                Log($"Deleting {archiveName}...");
                 File.Delete(archivePath);
+
                 progress.Value = 90;
-
-                // ── 4. Shortcut ──────────────────────────────────────────
                 CreateDesktopShortcut();
-                progress.Value = 100;
 
+                progress.Value = 100;
                 Log("Notepad++ updated successfully ✔");
-                MessageBox.Show(
-                    $"Notepad++ {latestVersion} is ready!\n\nShortcut placed on your Desktop.",
-                    "Update complete",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                MessageBox.Show("Update complete!", "Done", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
-            catch (Exception ex) when (ex is not InvalidOperationException)
+            catch (Exception ex)
             {
                 HardFail("Update failed: " + ex.Message);
             }
